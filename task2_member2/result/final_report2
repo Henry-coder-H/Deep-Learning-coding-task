@@ -1,0 +1,45 @@
+==================== 最终评估报告（Rec-only）====================
+OUT_DIR: /home/zwm/ocr/visual_result_croprec
+SAVE_IMAGES: False
+错误可视化目录: /home/zwm/ocr/visual_result_croprec/vis_err_50 (最多 50 张，实际保存 50 张)
+
+【模式：nowarp】
+错误样本清单:         /home/zwm/ocr/visual_result_croprec/bad_cases_nowarp.jsonl
+评测图片数量:         5000
+
+1) 准确率 (Accuracy)
+   - 全字匹配率（整牌全对）: 83.06%
+   - 字符准确率（逐字符平均）: 88.43%
+
+2) 推理速度 (Latency)
+   - 平均单张耗时: 7.39 ms
+   - FPS:          135.26
+
+3) 显存占用 (Memory)
+   - 显存峰值: 23.65 MB
+
+4) 鲁棒性 (Robustness)
+   - 大角度倾斜(>30°)整牌匹配率: 83.06% (样本数=5000)
+
+【模式：warp】
+错误样本清单:         /home/zwm/ocr/visual_result_croprec/bad_cases_warp.jsonl
+评测图片数量:         5000
+
+1) 准确率 (Accuracy)
+   - 全字匹配率（整牌全对）: 91.96%
+   - 字符准确率（逐字符平均）: 94.73%
+
+2) 推理速度 (Latency)
+   - 平均单张耗时: 7.43 ms
+   - FPS:          134.66
+
+3) 显存占用 (Memory)
+   - 显存峰值: 94.33 MB
+
+4) 鲁棒性 (Robustness)
+   - 大角度倾斜(>30°)整牌匹配率: 91.96% (样本数=5000)
+
+【透视变换增益】
+   - 全字匹配率提升：+8.90%  (warp - nowarp)
+
+=================================================================
