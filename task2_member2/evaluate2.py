@@ -4,7 +4,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import paddle
-from paddleocr import TextRecognition  #  只用识别模型（Rec-only）
+from paddleocr import TextRecognition  # 只用识别模型（Rec-only）
 from PIL import Image, ImageDraw, ImageFont
 
 SAVE_IMAGES = False   # True: 保存所有可视化；False: 仅保存最多50张错误可视化图
@@ -26,7 +26,9 @@ SEED = 0
 
 # 裁剪时给 bbox 加一点 padding，避免框太紧截断字符
 BBOX_PAD_RATIO = 0.08
-# =======================
+
+# 鲁棒性透视畸变
+ROBUST_PERSPECTIVE_QUANTILE = 0.90  # 分位数阈值
 
 # CCPD 解码表（省份 + alphabets + ads）
 PROVINCES = ["皖","沪","津","渝","冀","晋","蒙","辽","吉","黑","苏","浙","京","闽","赣","鲁","豫","鄂","湘","粤",
@@ -57,21 +59,6 @@ def decode_ccpd_gt(img_name: str) -> str | None:
         return prov + alpha + rest
     except Exception:
         return None
-
-def parse_ccpd_tilt(img_name: str):
-    """文件名第2段 tilt，例如 90_265 -> (h,v)"""
-    stem = Path(img_name).stem
-    parts = stem.split("-")
-    if len(parts) < 2:
-        return None
-    a, b = parts[1].split("_")
-    return float(a), float(b)
-
-def angle_to_abs_deg(x):
-    x = x % 360.0
-    if x > 180.0:
-        x -= 360.0
-    return abs(x)
 
 def parse_ccpd_bbox_vertices(img_name: str):
     """
@@ -111,7 +98,7 @@ def clean_text(t: str) -> str:
     return "".join(keep)
 
 def order_points(pts4: np.ndarray) -> np.ndarray:
-    """将4点排序为 [tl, tr, br, bl]"""
+    """将4点排序为 [tl, tr, br, bl]（用于 warp，保持你原逻辑不动）"""
     pts = pts4.copy()
     s = pts.sum(axis=1)
     diff = pts[:, 0] - pts[:, 1]
@@ -120,6 +107,45 @@ def order_points(pts4: np.ndarray) -> np.ndarray:
     tr = pts[np.argmax(diff)]
     bl = pts[np.argmin(diff)]
     return np.array([tl, tr, br, bl], dtype=np.float32)
+
+def order_points_for_geom(pts4: np.ndarray) -> np.ndarray:
+    """
+    将4点排序为 [tl, tr, br, bl]（用于几何打分更稳：diff 用 y-x）
+    """
+    pts = pts4.copy().astype(np.float32)
+    s = pts.sum(axis=1)
+    diff = np.diff(pts, axis=1).reshape(-1)  # y - x
+    tl = pts[np.argmin(s)]
+    br = pts[np.argmax(s)]
+    tr = pts[np.argmin(diff)]
+    bl = pts[np.argmax(diff)]
+    return np.array([tl, tr, br, bl], dtype=np.float32)
+
+def perspective_score_from_vertices(pts4: np.ndarray, eps=1e-6) -> float | None:
+    """
+    用四点顶点计算“透视强度分数”（越大越强透视/越梯形）：
+      score = |log(top/bottom)| + |log(left/right)|
+    其中：
+      top    = |tr - tl|
+      bottom = |br - bl|
+      left   = |bl - tl|
+      right  = |br - tr|
+    """
+    if pts4 is None or pts4.shape != (4, 2):
+        return None
+    tl, tr, br, bl = order_points_for_geom(pts4)
+
+    top = float(np.linalg.norm(tr - tl))
+    bottom = float(np.linalg.norm(br - bl))
+    left = float(np.linalg.norm(bl - tl))
+    right = float(np.linalg.norm(br - tr))
+
+    if min(top, bottom, left, right) < 1.0:
+        return None
+
+    s1 = abs(np.log((top + eps) / (bottom + eps)))
+    s2 = abs(np.log((left + eps) / (right + eps)))
+    return float(s1 + s2)
 
 def crop_by_bbox(img_bgr, bbox, pad_ratio=BBOX_PAD_RATIO):
     h, w = img_bgr.shape[:2]
@@ -137,7 +163,7 @@ def crop_by_bbox(img_bgr, bbox, pad_ratio=BBOX_PAD_RATIO):
 
 def warp_by_vertices(img_bgr, pts4):
     """用四点做透视矫正，把车牌拉正"""
-    rect = order_points(pts4)  # tl,tr,br,bl
+    rect = order_points(pts4)  # tl, tr, br, bl
     (tl, tr, br, bl) = rect
 
     def dist(a, b):
@@ -213,14 +239,13 @@ def recog_plate(rec_model: TextRecognition, plate_bgr):
     pred = clean_text(pred_raw)
     return pred, score, pred_raw
 
-def eval_one_mode(img_paths, rec_model, use_warp: bool, tag: str):
+def eval_one_mode(img_paths, rec_model, use_warp: bool, tag: str, persp_thr: float | None):
     """
     评测一遍：
     - nowarp: bbox 裁剪 + rec
     - warp:   四点透视 + rec
-    可视化规则：
-    - SAVE_IMAGES=True：保存所有样本图到 vis_{tag}/ 与 plate_{tag}/
-    - SAVE_IMAGES=False：最多保存50张错误样本图到 OUT_DIR/vis_err_50/
+    鲁棒性：
+    - 强透视子集：perspective_score >= persp_thr
     """
     global ERR_VIS_COUNT, ERR_VIS_DIR
 
@@ -239,7 +264,10 @@ def eval_one_mode(img_paths, rec_model, use_warp: bool, tag: str):
     total = full_ok = 0
     corr_chars = total_chars = 0
     time_sum = 0.0
-    tilt_total = tilt_ok = 0
+
+    # 鲁棒性：强透视子集
+    robust_total = 0
+    robust_ok = 0
 
     # 显存峰值清零（可选）
     if DEVICE.startswith("gpu"):
@@ -283,14 +311,14 @@ def eval_one_mode(img_paths, rec_model, use_warp: bool, tag: str):
         corr_chars += m
         total_chars += n
 
-        tilt = parse_ccpd_tilt(p.name)
-        if tilt is not None:
-            h, v = tilt
-            if max(angle_to_abs_deg(h), angle_to_abs_deg(v)) > 30:
-                tilt_total += 1
-                tilt_ok += int(ok)
+        # ===== 鲁棒性：强透视子集统计 =====
+        if persp_thr is not None and pts4 is not None:
+            ps = perspective_score_from_vertices(pts4)
+            if ps is not None and ps >= persp_thr:
+                robust_total += 1
+                robust_ok += int(ok)
 
-        # ===== 可视化保存规则（不改变识别逻辑，仅改变保存行为）=====
+        # ===== 可视化保存规则 =====
         if SAVE_IMAGES:
             crop_name = f"{'OK' if ok else 'ERR'}_{i:05d}_{p.stem}.jpg"
             cv2.imwrite(str(crop_dir / crop_name), plate)
@@ -316,6 +344,7 @@ def eval_one_mode(img_paths, rec_model, use_warp: bool, tag: str):
 
         # 错误样本记录
         if not ok:
+            ps = perspective_score_from_vertices(pts4) if pts4 is not None else None
             with bad_cases_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps({
                     "img": str(p),
@@ -324,7 +353,8 @@ def eval_one_mode(img_paths, rec_model, use_warp: bool, tag: str):
                     "pred_raw": pred_raw,
                     "score": float(score),
                     "use_warp": bool(use_warp),
-                    "latency_ms": latency_ms
+                    "latency_ms": latency_ms,
+                    "perspective_score": float(ps) if ps is not None else None
                 }, ensure_ascii=False) + "\n")
 
         if i % 200 == 0 or i == 1:
@@ -342,7 +372,7 @@ def eval_one_mode(img_paths, rec_model, use_warp: bool, tag: str):
         except Exception:
             mem_peak_mb = -1.0
 
-    tilt_acc = (tilt_ok / tilt_total) if tilt_total else 0.0
+    robust_acc = (robust_ok / robust_total) if robust_total else 0.0
 
     return {
         "tag": tag,
@@ -352,8 +382,8 @@ def eval_one_mode(img_paths, rec_model, use_warp: bool, tag: str):
         "avg_ms": avg_ms,
         "fps": fps,
         "mem_peak_mb": mem_peak_mb,
-        "tilt_total": tilt_total,
-        "tilt_acc": tilt_acc,
+        "robust_total": robust_total,
+        "robust_acc": robust_acc,
         "vis_dir": str(vis_dir.resolve()) if SAVE_IMAGES else "",
         "crop_dir": str(crop_dir.resolve()) if SAVE_IMAGES else "",
         "bad_cases": str(bad_cases_path.resolve()),
@@ -390,6 +420,22 @@ def main():
 
     print(f"Using {len(img_paths)} images. OUT_DIR={Path(OUT_DIR).resolve()} MODE={MODE} SAVE_IMAGES={SAVE_IMAGES}")
 
+    # ===== 计算强透视阈值（一次，供 nowarp/warp 共用）=====
+    persp_scores = []
+    for p in img_paths:
+        _, pts4 = parse_ccpd_bbox_vertices(p.name)
+        ps = perspective_score_from_vertices(pts4)
+        if ps is not None:
+            persp_scores.append(ps)
+
+    persp_thr = None
+    if len(persp_scores) >= 10:
+        persp_thr = float(np.quantile(np.array(persp_scores, dtype=np.float32), ROBUST_PERSPECTIVE_QUANTILE))
+
+    print(f"[Robustness] strong perspective subset: quantile={ROBUST_PERSPECTIVE_QUANTILE:.2f}, "
+          f"samples_with_score={len(persp_scores)}, threshold={persp_thr}")
+    # ============================================
+
     rec = TextRecognition(model_name="PP-OCRv5_server_rec", device=DEVICE)
 
     # 预热
@@ -400,9 +446,9 @@ def main():
 
     results = []
     if MODE in ("nowarp", "both"):
-        results.append(eval_one_mode(img_paths, rec, use_warp=False, tag="nowarp"))
+        results.append(eval_one_mode(img_paths, rec, use_warp=False, tag="nowarp", persp_thr=persp_thr))
     if MODE in ("warp", "both"):
-        results.append(eval_one_mode(img_paths, rec, use_warp=True, tag="warp"))
+        results.append(eval_one_mode(img_paths, rec, use_warp=True, tag="warp", persp_thr=persp_thr))
 
     # ====== 组装报告文本（终端输出 + 保存txt）======
     report_lines = []
@@ -433,7 +479,7 @@ def main():
         report_lines.append(f"   - 显存峰值: {r['mem_peak_mb']:.2f} MB")
         report_lines.append("")
         report_lines.append("4) 鲁棒性 (Robustness)")
-        report_lines.append(f"   - 大角度倾斜(>30°)整牌匹配率: {r['tilt_acc']*100:.2f}% (样本数={r['tilt_total']})")
+        report_lines.append(f"   - 强透视子集整牌匹配率: {r['robust_acc']*100:.2f}% (样本数={r['robust_total']})")
         report_lines.append("")
 
     if MODE == "both" and len(results) == 2:
@@ -447,7 +493,6 @@ def main():
     report_lines.append("=================================================================")
 
     report_text = "\n".join(report_lines)
-
     print("\n" + report_text)
 
     report_path = Path(OUT_DIR) / "final_report.txt"
