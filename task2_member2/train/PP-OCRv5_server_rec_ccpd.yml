@@ -1,0 +1,136 @@
+Global:
+  model_name: PP-OCRv5_server_rec # To use static model for inference.
+  debug: false
+  use_gpu: true
+  epoch_num: 10
+  log_smooth_window: 20
+  print_batch_step: 10
+  save_model_dir: ./output/PP-OCRv5_server_rec
+  save_epoch_step: 5
+  eval_batch_step: [0, 2000]
+  cal_metric_during_train: true
+  calc_epoch_interval: 1
+  pretrained_model: 
+  checkpoints:
+  save_inference_dir:
+  use_visualdl: false
+  infer_img: doc/imgs_words/ch/word_1.jpg
+  character_dict_path: train_data/rec/ccpd/plate_dict.txt
+  max_text_length: &max_text_length 12
+  infer_mode: false
+  use_space_char: false
+  distributed: true
+  save_res_path: ./output/rec/predicts_ppocrv5.txt
+  d2s_train_image_shape: [3, 48, 320]
+
+
+Optimizer:
+  name: Adam
+  beta1: 0.9
+  beta2: 0.999
+  lr:
+    name: Cosine
+    learning_rate: 0.0005
+    warmup_epoch: 1
+  regularizer:
+    name: L2
+    factor: 3.0e-05
+
+
+Architecture:
+  model_type: rec
+  algorithm: SVTR_HGNet
+  Transform:
+  Backbone:
+    name: PPHGNetV2_B4
+    text_rec: True
+  Head:
+    name: MultiHead
+    head_list:
+      - CTCHead:
+          Neck:
+            name: svtr
+            dims: 120
+            depth: 2
+            hidden_dims: 120
+            kernel_size: [1, 3]
+            use_guide: True
+          Head:
+            fc_decay: 0.00001
+      - NRTRHead:
+          nrtr_dim: 384
+          max_text_length: *max_text_length
+
+Loss:
+  name: MultiLoss
+  loss_config_list:
+    - CTCLoss:
+    - NRTRLoss:
+
+PostProcess:  
+  name: CTCLabelDecode
+
+Metric:
+  name: RecMetric
+  main_indicator: acc
+
+Train:
+  dataset:
+    name: MultiScaleDataSet          # 保持 MultiScaleDataSet
+    ds_width: false
+    data_dir: /
+    ext_op_transform_idx: 1
+    label_file_list:
+    - ./train_data/rec/ccpd/rec_gt_train.txt
+    transforms:
+    - DecodeImage:
+        img_mode: BGR
+        channel_first: false
+    - CCPDWarp: {expand: 1.08, min_size: 32}
+    # - RecAug: {}                   # 关键：先删掉/注释掉
+    - MultiLabelEncode:
+        gtc_encode: NRTRLabelEncode
+    - KeepKeys:
+        keep_keys: [image, label_ctc, label_gtc, length, valid_ratio]
+
+  sampler:
+    name: MultiScaleSampler          # 保持 MultiScaleSampler
+    scales: [[320, 32], [320, 48], [320, 64]]
+    first_bs: 128
+    fix_bs: false
+    divided_factor: [8, 16]
+    is_training: True
+
+  loader:
+    shuffle: true
+    batch_size_per_card: 64          # 建议先降一点更稳
+    drop_last: true
+    num_workers: 0                   # 关键：先用 0，报错会更清楚
+
+Eval:
+  dataset:
+    name: SimpleDataSet
+    data_dir: ./train_data
+    label_file_list:
+    - train_data/rec/ccpd/rec_gt_val.txt
+    transforms:
+    - DecodeImage:
+        img_mode: BGR
+        channel_first: false
+    - CCPDWarp: {expand: 1.08}   # 自定义的算子（在线warp，不落盘）
+    - MultiLabelEncode:
+        gtc_encode: NRTRLabelEncode
+    - RecResizeImg:
+        image_shape: [3, 48, 320]
+    - KeepKeys:
+        keep_keys:
+        - image
+        - label_ctc
+        - label_gtc
+        - length
+        - valid_ratio
+  loader:
+    shuffle: false
+    drop_last: false
+    batch_size_per_card: 128
+    num_workers: 4
