@@ -394,10 +394,9 @@ PreProcess:
 >
 
 ### 5.3 视频检测效果：
+![alt text](train.png)
 
-![image-20260108115145779](C:\Users\35011\AppData\Roaming\Typora\typora-user-images\image-20260108115145779.png)
-
-![image-20260108115238186](C:\Users\35011\AppData\Roaming\Typora\typora-user-images\image-20260108115238186.png)
+![alt text](../val/image.png)
 
 图一为训练后图二为先前
 
