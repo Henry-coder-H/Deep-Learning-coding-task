@@ -111,13 +111,13 @@ python scripts/prepare_recognition_data.py \
 # 训练 YOLOv8-Pose
 CUDA_VISIBLE_DEVICES=0 python detection/train_yolo_pose.py \
   --data configs/data_ccpd_kpts.yaml \
-  --epochs 50 --batch 32 --device 0
+  --epochs 50 --batch 32 --device cuda
 
 # 训练 CRNN
 CUDA_VISIBLE_DEVICES=0 python recognition/train_crnn.py \
   --train-labels data/rec/train_labels.txt \
   --val-labels data/rec/val_labels.txt \
-  --imgw 160 --imgh 32 --batch 256 --epochs 20 --device 0
+  --imgw 160 --imgh 32 --batch 256 --epochs 20 --device cuda
 ```
 
 ## 7. 使用方法 (Inference)
