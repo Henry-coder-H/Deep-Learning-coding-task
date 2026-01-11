@@ -65,7 +65,7 @@ task2_member1/
 
 由于模型权重文件较大，未包含在 GitHub 仓库中。请从以下 Google Drive 链接下载，并按说明放置：
 
-**下载链接**: [在此处插入 Google Drive 链接]
+**下载链接**: [https://drive.google.com/drive/folders/1bMAGJsc16aSJoFujJ4_MEHCLUpmQgeM1?usp=drive_link]
 
 **放置位置**:
 1.  下载 `best.pt` (YOLO 检测权重)，放入 `runs/pose/train/weights/` 目录（如果目录不存在请手动创建）。
