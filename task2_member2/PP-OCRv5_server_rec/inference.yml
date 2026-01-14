@@ -1,0 +1,98 @@
+Global:
+  model_name: PP-OCRv5_server_rec
+Hpi:
+  backend_configs:
+    paddle_infer:
+      trt_dynamic_shapes: &id001
+        x:
+        - - 1
+          - 3
+          - 48
+          - 160
+        - - 1
+          - 3
+          - 48
+          - 320
+        - - 8
+          - 3
+          - 48
+          - 3200
+    tensorrt:
+      dynamic_shapes: *id001
+PreProcess:
+  transform_ops:
+  - DecodeImage:
+      channel_first: false
+      img_mode: BGR
+  - RecResizeImg:
+      image_shape: [3, 48, 320]
+  - KeepKeys:
+      keep_keys: [image]
+PostProcess:
+  name: CTCLabelDecode
+  character_dict:
+  - '0'
+  - '1'
+  - '2'
+  - '3'
+  - '4'
+  - '5'
+  - '6'
+  - '7'
+  - '8'
+  - '9'
+  - A
+  - B
+  - C
+  - D
+  - E
+  - F
+  - G
+  - H
+  - J
+  - K
+  - L
+  - M
+  - N
+  - P
+  - Q
+  - R
+  - S
+  - T
+  - U
+  - V
+  - W
+  - X
+  - Y
+  - Z
+  - 云
+  - 京
+  - 冀
+  - 吉
+  - 宁
+  - 川
+  - 新
+  - 晋
+  - 桂
+  - 沪
+  - 津
+  - 浙
+  - 渝
+  - 湘
+  - 琼
+  - 甘
+  - 皖
+  - 粤
+  - 苏
+  - 蒙
+  - 藏
+  - 豫
+  - 贵
+  - 赣
+  - 辽
+  - 鄂
+  - 闽
+  - 陕
+  - 青
+  - 鲁
+  - 黑
