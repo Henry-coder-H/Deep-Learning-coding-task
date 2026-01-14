@@ -9,7 +9,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT))
 
-from pipeline.utils import CRNN_ALPHABET
+from pipeline.utils import CRNN_ALPHABET, fix_plate_text
 from recognition.model import CRNN
 from recognition.utils import CTCLabelConverter
 
@@ -57,7 +57,7 @@ class CRNNRecognizer:
             pred_lens = torch.full((B,), T, dtype=torch.long, device=self.device)
             
             texts = self.converter.decode(preds, pred_lens)
-            return texts[0]
+            return fix_plate_text(texts[0])
 
     def predict_batch(self, images: List[np.ndarray]) -> List[str]:
         if not images:
@@ -82,7 +82,7 @@ class CRNNRecognizer:
             T, B, _ = preds.shape
             pred_lens = torch.full((B,), T, dtype=torch.long, device=self.device)
             texts = self.converter.decode(preds, pred_lens)
-            return texts
+            return [fix_plate_text(t) for t in texts]
 
 
 

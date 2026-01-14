@@ -41,9 +41,27 @@ PROVINCES = [
 ]
 
 ALPHAS = list("ABCDEFGHJKLMNPQRSTUVWXYZ")  # I/O are not used
-ADS = list("0123456789ABCDEFGHJKLMNPQRSTUVWXYZ")
-# Unique alphabet for CRNN (Chinese + letters + digits)
+# CCPD 官方定义：字母在前，数字在后
+ADS = list("ABCDEFGHJKLMNPQRSTUVWXYZ") + list("0123456789")
+# CRNN 字符表：与训练时一致（字母在前）
 CRNN_ALPHABET = PROVINCES + list("ABCDEFGHJKLMNPQRSTUVWXYZ") + list("0123456789")
+
+# 后处理映射：修正因训练数据ADS顺序错误导致的字符错位
+# 训练时用的错误ADS（数字在前） vs 正确ADS（字母在前）
+_WRONG_ADS = list("0123456789ABCDEFGHJKLMNPQRSTUVWXYZ")
+_CORRECT_ADS = list("ABCDEFGHJKLMNPQRSTUVWXYZ0123456789")
+PLATE_FIX_MAP = {_WRONG_ADS[i]: _CORRECT_ADS[i] for i in range(len(_WRONG_ADS))}
+
+
+def fix_plate_text(plate: str) -> str:
+    """修正模型输出的车牌文本（第3-7位字符映射）"""
+    if len(plate) <= 2:
+        return plate
+    # 前2位（省份+字母）不变，第3-7位做映射修正
+    fixed = plate[:2]
+    for c in plate[2:]:
+        fixed += PLATE_FIX_MAP.get(c, c)
+    return fixed
 
 
 def decode_plate(label_part: str) -> str:
