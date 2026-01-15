@@ -32,9 +32,49 @@ class InferenceEngine:
     def run(self, input_path, output_path, report_path):
         ext = os.path.splitext(input_path)[1].lower()
         if ext in ['.jpg', '.jpeg', '.png']:
-            self._process_image(input_path, output_path)
+            self._process_image(input_path, output_path, report_path)
         elif ext in ['.mp4', '.avi', '.mov']:
             self._process_video(input_path, output_path, report_path)
+
+    def _process_image(self, img_path, save_path, report_path=None):
+        """
+        处理单张图片：推理 -> 统计 -> 绘图 -> 保存 -> 生成报告
+        """
+        print(f"🖼️ [图片] 开始处理: {img_path}")
+        img = cv2.imread(img_path)
+        if img is None:
+            print(f"❌ 错误: 无法读取图片 {img_path}")
+            return
+
+        # 1. 推理 (图片无需跟踪模式，使用 predict 即可)
+        results = self.model.predict(img, conf=0.25, verbose=False)[0]
+
+        # 2. 统计逻辑适配
+        # 图片模式下没有 Track ID，为了适配 self.vehicle_counts 的 set 结构，
+        # 我们使用当前帧的检测框索引(index)作为"伪ID"进行计数。
+        if results.boxes:
+            cls_ids = results.boxes.cls.int().cpu().numpy()
+            for i, c_id in enumerate(cls_ids):
+                class_name = self.class_names[c_id]
+                # 使用 i 作为临时唯一标识，确保 len(set) 统计正确
+                self.vehicle_counts[class_name].add(i)
+
+        # 3. 绘图 (复用现有方法)
+        self._draw_results(img, results, is_video=False)
+        self._draw_statistics_panel(img)
+
+        # 4. 智能修正保存路径后缀
+        # 如果主程序传入的是 .mp4 后缀（针对视频的默认设置），强制改为 .jpg
+        root, ext = os.path.splitext(save_path)
+        if ext.lower() not in ['.jpg', '.jpeg', '.png']:
+            save_path = root + ".jpg"
+        
+        cv2.imwrite(save_path, img)
+        print(f"✅ 图片推理完成，已保存至: {save_path}")
+
+        # 5. 生成分析报告 (如果传入了 report_path)
+        if report_path:
+            self._generate_report(report_path)
 
     def _process_video(self, vid_path, save_path, report_path):
         cap = cv2.VideoCapture(vid_path)
@@ -50,7 +90,8 @@ class InferenceEngine:
             if not ret: break
             
             # 使用跟踪模式
-            results = self.model.track(frame, persist=True, conf=0.25, verbose=False)[0]
+            # results = self.model.track(frame, persist=True, conf=0.25, verbose=False)[0]
+            results = self.model.predict(frame, conf=0.25, verbose=False)[0]
             
             # 1. 实时统计 ID
             if results.boxes.id is not None:
@@ -153,7 +194,7 @@ class InferenceEngine:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--input', type=str, required=True, help="输入路径")
-    parser.add_argument('--model', default='/taske1/best.pt')
+    parser.add_argument('--model', default='./task1/best.pt')
     parser.add_argument('--out_dir', default='runs')
     args = parser.parse_args()
 
