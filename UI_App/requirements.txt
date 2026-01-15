@@ -1,0 +1,19 @@
+# 智能交通识别系统 - 依赖包
+
+# 核心框架
+streamlit>=1.28.0
+streamlit-image-coordinates>=0.4.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+pandas>=2.0.0
+Pillow>=10.0.0
+
+# 深度学习框架
+torch>=2.0.0
+torchvision>=0.15.0
+
+# YOLO 检测
+ultralytics>=8.0.0
+
+# 其他工具
+tqdm>=4.65.0
