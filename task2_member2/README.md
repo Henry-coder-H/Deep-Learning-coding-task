@@ -143,8 +143,8 @@ python evaluate_train_rec.py
 git clone https://github.com/PaddlePaddle/PaddleOCR.git
 cd PaddleOCR
 
-# 安装完整依赖（含训练、数据处理、评估组件，使用清华源加速）
-python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+# 安装完整依赖（含训练、数据处理、评估组件）
+python -m pip install -r requirements.txt 
 ```
 
 #### 1.2 预训练模型下载
