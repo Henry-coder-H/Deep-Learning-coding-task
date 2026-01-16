@@ -5,12 +5,12 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from paddleocr import PaddleOCR
 
-DATASET_ROOT = Path(r"D:/Study/2025-2026_fall/DL/code/task2/CCPD2019/CCPD2019")
-ALL_TEST = DATASET_ROOT / "D:/Study/2025-2026_fall/DL/code/task2/CCPD2019/CCPD2019/splits/all_hardtest.txt"
-ALL_HARD = DATASET_ROOT / "D:/Study/2025-2026_fall/DL/code/task2/CCPD2019/CCPD2019/splits/all_hardtest.txt"
+DATASET_ROOT = Path("./datasets")
+ALL_TEST = DATASET_ROOT / "splits/all_test.txt"
+ALL_HARD = DATASET_ROOT / "splits/all_hardtest.txt"
 
-DET_DIR = Path("C:/Users/24849/.paddlex/official_models/PP-OCRv5_server_det").expanduser()
-REC_DIR = Path("D:/Study/2025-2026_fall/DL/code/Deep-Learning-coding-task/task2_member2/PP-OCRv5_server_rec").expanduser()
+DET_DIR = Path("./PP-OCRv5_server_det").expanduser()
+REC_DIR = Path("./.paddlex/official_models/PP-OCRv5_server_rec").expanduser()
 
 OUT_DIR = Path("./e2e_eval_out")
 VIS_DIR = OUT_DIR / "vis_err"
