@@ -4,12 +4,20 @@ import re
 from ultralytics import YOLO
 from paddleocr import PaddleOCR, TextRecognition
 
-# --- 核心配置 (复刻自 test.py) ---
+# --- 核心配置 (保持原有) ---
 CONF_VEHICLE = 0.5         # 车辆检测阈值
 MIN_CAR_W_FOR_OCR = 150    # 车宽小于此值不识别
-CAR_OCR_UPSCALE = 3.0      # 车图放大倍数 (Det阶段)
-PLATE_REC_UPSCALE = 2.5    # 车牌放大倍数 (Rec阶段)
+CAR_OCR_UPSCALE = 2.5      # 车图放大倍数 (Det阶段)
+PLATE_REC_UPSCALE = 2    # 车牌放大倍数 (Rec阶段)
 ENABLE_WARP = True         # 启用透视变换
+
+# --- 新增：Test.py 中的记忆策略配置 ---
+TRACKER = "bytetrack.yaml" # YOLO 追踪配置
+FRAME_SKIP = 5             # 视频识别频率：每隔多少帧做一次OCR
+IOU_ASSOC_THRESH = 0.4     # 记忆关联 IoU 阈值
+MAX_MISS_FRAMES = 100      # 记忆保留最长帧数
+UPGRADE_CONFIRM = 2        # 升级文本需要的连续命中次数
+SCORE_DELTA_UPDATE = 0.03  # 同级替换需要的分数增量
 
 # 车辆类别 (COCO): car=2, motorcycle=3, bus=5, truck=7
 VEHICLE_CLASSES = {2, 3, 5, 7}
@@ -17,12 +25,14 @@ VEHICLE_CLASSES = {2, 3, 5, 7}
 # 正则过滤
 CN_STRICT_RE = re.compile(r"^[\u4e00-\u9fff][A-Z][A-Z0-9]{5,6}$")
 FOREIGN_RE = re.compile(r"^(?=.*[A-Z])[A-Z0-9]{5,10}$")
+DIGITS_ONLY_RE = re.compile(r"^[0-9]{5,10}$") # 新增：纯数字正则用于过滤
 VALID_CN_PREFIX = set(list("京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼港澳使领警学挂"))
 
 class PaddleVideoRecognizer:
     def __init__(self, yolo_path, use_gpu=True):
         """
         初始化：YOLO用于找车，PaddleOCR用于找牌和认字
+        (严格保留原有代码)
         """
         device = "gpu:0" if use_gpu else "cpu"
         
@@ -42,12 +52,20 @@ class PaddleVideoRecognizer:
         )
         self.rec_model = TextRecognition(model_name="PP-OCRv5_server_rec", device=device)
         print("[PaddleModel] Loaded successfully.")
+        
+        # [新增] 初始化记忆模块
+        self.reset_memory()
+
+    def reset_memory(self):
+        """重置视频记忆状态 (切换视频时调用)"""
+        self.memory = {}    # 存储 {mid: {info}}
+        self.tid2mid = {}   # YOLO track_id -> memory_id
+        self.next_mid = 1   # 下一个可用的 memory_id
 
     def recognize_image(self, img_bgr):
         """
-        app.py 调用的统一接口
-        输入: 当前帧 (BGR)
-        输出: list [ {'bbox': [x1,y1,x2,y2], 'text': str, 'conf': float}, ... ]
+        app.py 调用的统一接口 (图片模式)
+        (保持原有逻辑不变，用于单张图片处理)
         """
         results = []
         H, W = img_bgr.shape[:2]
@@ -59,33 +77,134 @@ class PaddleVideoRecognizer:
         # 2. 遍历每辆车
         for v_box in vehicle_boxes:
             vx1, vy1, vx2, vy2 = v_box
-            
-            # 尺寸过滤
-            if (vx2 - vx1) < MIN_CAR_W_FOR_OCR:
-                continue
+            if (vx2 - vx1) < MIN_CAR_W_FOR_OCR: continue
 
-            # 裁剪车辆区域
             car_crop = img_bgr[vy1:vy2, vx1:vx2]
-            
-            # 核心识别流程 (Det -> Warp -> Rec)
             text, score, _ = self._process_one_car(car_crop)
 
             if text:
-                # 只要识别到了，就返回车辆的大框作为 bbox (方便 UI 绘制)
-                # 注：如果需要精确的车牌小框，需要在此处进行坐标换算，
-                # 但为了视频展示稳定性，通常返回车辆框视觉效果更好。
                 results.append({
                     'bbox': [vx1, vy1, vx2, vy2], 
                     'text': text,
                     'conf': score
                 })
+        return results
+
+    def process_video_frame(self, img_bgr, frame_idx):
+        """
+        [新增] 视频专用处理接口：包含 追踪 + 记忆 + 择机OCR
+        对应 test.py 中的 process_video 核心循环逻辑
+        """
+        H, W = img_bgr.shape[:2]
+        
+        # 1. YOLO Track (开启 persist=True 保持追踪)
+        # 注意：这里使用 track 而不是 predict
+        r = self.det_vehicle.track(img_bgr, persist=True, tracker=TRACKER, conf=CONF_VEHICLE, verbose=False)[0]
+        dets = self._filter_vehicle_boxes(r, W, H, has_track_id=True) # 获取带 tid 的框
+
+        # --- 以下是复刻 test.py 的记忆管理逻辑 ---
+
+        # A. 所有记忆先记一次 "miss" (消失)
+        for mid in list(self.memory.keys()):
+            self.memory[mid]["miss"] += 1
+
+        assigned = [None] * len(dets)
+        used_mids = set()
+
+        # B. 优先通过 YOLO track_id 找回记忆
+        for i, d in enumerate(dets):
+            tid = d["tid"]
+            if tid is not None and tid in self.tid2mid:
+                mid = self.tid2mid[tid]
+                if mid in self.memory:
+                    assigned[i] = mid
+                    used_mids.add(mid)
+
+        # C. 其次通过 IoU 找回 (防止 YOLO ID 切换或短暂丢失)
+        for i, d in enumerate(dets):
+            if assigned[i] is not None: continue
+            box = d["xyxy"]
+            best_mid, best_iou = None, 0.0
+            for mid, m in self.memory.items():
+                if mid in used_mids: continue
+                v = self._iou(box, m["bbox"])
+                if v > best_iou:
+                    best_iou, best_mid = v, mid
+            
+            if best_mid is not None and best_iou >= IOU_ASSOC_THRESH:
+                assigned[i] = best_mid
+                used_mids.add(best_mid)
+
+        # D. 为未匹配的车辆创建新记忆
+        for i, d in enumerate(dets):
+            if assigned[i] is None:
+                mid = self.next_mid
+                self.next_mid += 1
+                self.memory[mid] = {
+                    "bbox": d["xyxy"], 
+                    "text": "", "score": 0.0, "miss": 0,
+                    "pending_text": "", "pending_cnt": 0, "pending_score": 0.0
+                }
+                assigned[i] = mid
+
+        # E. 更新被激活的记忆 (位置和 miss 计数)
+        for i, d in enumerate(dets):
+            mid = assigned[i]
+            self.memory[mid]["bbox"] = d["xyxy"]
+            self.memory[mid]["miss"] = 0
+            if d["tid"] is not None:
+                self.tid2mid[d["tid"]] = mid
+
+        # F. 清理由于长时间消失而过期的记忆
+        for mid in list(self.memory.keys()):
+            if self.memory[mid]["miss"] > MAX_MISS_FRAMES:
+                del self.memory[mid]
+        # 同步清理映射表
+        self.tid2mid = {tid: mid for tid, mid in self.tid2mid.items() if mid in self.memory}
+
+        # --- 开始执行 OCR 策略 ---
+        results = []
+        do_ocr = (frame_idx % FRAME_SKIP == 0)
+
+        for i, d in enumerate(dets):
+            x1, y1, x2, y2 = d["xyxy"]
+            mid = assigned[i]
+            
+            # 策略：如果记忆里还没字，或者到了定时检查帧，并且车够宽 -> 做 OCR
+            should_ocr = False
+            has_text = bool(self.memory[mid]["text"])
+            
+            if (x2 - x1) >= MIN_CAR_W_FOR_OCR:
+                if not has_text: should_ocr = True  # 没字，立即识别
+                elif do_ocr: should_ocr = True      # 有字，例行检查
+
+            if should_ocr:
+                car_crop = img_bgr[y1:y2, x1:x2]
+                if car_crop.size != 0:
+                    text, score, _ = self._process_one_car(car_crop)
+                    if text:
+                        # 核心：使用打分逻辑更新记忆
+                        self._update_memory_item(self.memory[mid], text, score)
+
+            # --- 最终输出结果 ---
+            # 直接从记忆中取最稳定的结果
+            final_text = self.memory[mid].get("text", "")
+            final_score = self.memory[mid].get("score", 0.0)
+
+            if final_text:
+                results.append({
+                    'bbox': [x1, y1, x2, y2],
+                    'text': final_text,
+                    'conf': final_score,
+                    'track_id': mid # 使用我们自己维护的 memory id
+                })
 
         return results
 
-    # --- 内部核心逻辑 (复刻自 test.py) ---
+    # --- 内部 OCR 核心逻辑 (复刻自 test.py) ---
 
     def _process_one_car(self, car_crop):
-        # 1. 放大车辆图 (为了更好地检测小车牌)
+        # 1. 放大车辆图
         car_in = car_crop
         if CAR_OCR_UPSCALE > 1.0:
             car_in = cv2.resize(car_in, None, fx=CAR_OCR_UPSCALE, fy=CAR_OCR_UPSCALE, interpolation=cv2.INTER_CUBIC)
@@ -96,7 +215,7 @@ class PaddleVideoRecognizer:
         if plate_crop is None or plate_crop.size == 0:
             return None, 0.0, None
 
-        # 3. 放大车牌图 (为了更好地识别文字)
+        # 3. 放大车牌图
         if PLATE_REC_UPSCALE > 1.0:
             plate_crop = cv2.resize(plate_crop, None, fx=PLATE_REC_UPSCALE, fy=PLATE_REC_UPSCALE, interpolation=cv2.INTER_CUBIC)
 
@@ -156,17 +275,27 @@ class PaddleVideoRecognizer:
         x, y, w, h = cv2.boundingRect(pts)
         return car_crop[y:y+h, x:x+w].copy(), best_poly
 
-    # --- 辅助函数 ---
-    def _filter_vehicle_boxes(self, r, W, H):
+    # --- 辅助函数 (Logic from test.py) ---
+    def _filter_vehicle_boxes(self, r, W, H, has_track_id=False):
         if r.boxes is None or r.boxes.xyxy is None: return []
         xyxy = r.boxes.xyxy.detach().cpu().numpy().astype(int)
         cls = r.boxes.cls.detach().cpu().numpy().astype(int) if r.boxes.cls is not None else None
+        # 如果是 track 模式，获取 ID
+        ids = None
+        if has_track_id and getattr(r.boxes, "id", None) is not None:
+             ids = r.boxes.id.detach().cpu().numpy().astype(int)
+             
         out = []
         for i, (x1, y1, x2, y2) in enumerate(xyxy):
             if int(cls[i]) in VEHICLE_CLASSES:
                 x1, y1 = max(0, x1), max(0, y1)
                 x2, y2 = min(W-1, x2), min(H-1, y2)
-                out.append((x1, y1, x2, y2))
+                
+                if has_track_id:
+                     tid = int(ids[i]) if ids is not None else None
+                     out.append({"xyxy": (x1, y1, x2, y2), "tid": tid})
+                else:
+                     out.append((x1, y1, x2, y2))
         return out
 
     def _clean_text(self, s):
@@ -184,6 +313,66 @@ class PaddleVideoRecognizer:
         return 1 if has_LD(t) else 0
 
     def _valid_candidate(self, t): return self._quality(t) >= 1
+
+    def _iou(self, a, b):
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+        inter = iw * ih
+        if inter <= 0: return 0.0
+        area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+        area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+        return float(inter / (area_a + area_b - inter + 1e-6))
+        
+    def _should_update_same_level(self, old_t, old_s, new_t, new_s) -> bool:
+        if new_s > old_s + SCORE_DELTA_UPDATE: return True
+        if len(new_t) > len(old_t) and new_s >= old_s - 0.01: return True
+        return False
+
+    def _update_memory_item(self, m, new_text, new_score):
+        """核心：更新记忆中的文字和分数 (Logic from test.py)"""
+        if not new_text or not self._valid_candidate(new_text): return
+
+        old_text = m.get("text", "")
+        old_score = float(m.get("score", 0.0))
+        old_q = self._quality(old_text)
+        new_q = self._quality(new_text)
+
+        # 1. 如果本来没字，直接赋值
+        if not old_text:
+            m["text"], m["score"] = new_text, float(new_score)
+            m["pending_text"], m["pending_cnt"], m["pending_score"] = "", 0, 0.0
+            return
+
+        # 2. 如果新字质量差，放弃
+        if new_q < old_q: return
+
+        # 3. 如果质量同级，看分数和长度
+        if new_q == old_q:
+            if self._should_update_same_level(old_text, old_score, new_text, float(new_score)):
+                m["text"], m["score"] = new_text, float(new_score)
+            return
+
+        # 4. 升级逻辑 (Level Up)：防止一帧误识别覆盖
+        ptxt = m.get("pending_text", "")
+        pcnt = int(m.get("pending_cnt", 0))
+        pscore = float(m.get("pending_score", 0.0))
+
+        if new_text == ptxt:
+            pcnt += 1
+            pscore = max(pscore, float(new_score))
+        else:
+            ptxt = new_text
+            pcnt = 1
+            pscore = float(new_score)
+
+        m["pending_text"], m["pending_cnt"], m["pending_score"] = ptxt, pcnt, pscore
+
+        if pcnt >= UPGRADE_CONFIRM:
+            m["text"], m["score"] = ptxt, pscore
+            m["pending_text"], m["pending_cnt"], m["pending_score"] = "", 0, 0.0
 
     def _warp_quad(self, img, quad):
         pts = np.array(quad, dtype=np.float32)

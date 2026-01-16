@@ -17,6 +17,9 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 import matplotlib.pyplot as plt
 import matplotlib
 from collections import defaultdict
+import plotly.express as px  # <--- 新增这行
+import plotly.graph_objects as go  # <--- 新增
+from plotly.subplots import make_subplots  # <--- 新增
 
 matplotlib.rcParams['font.sans-serif'] = ['SimHei']
 matplotlib.rcParams['axes.unicode_minus'] = False
@@ -306,21 +309,16 @@ def associate_plates_to_vehicles(vehicles: List[Dict], plates: List[Dict]) -> Li
 
 def draw_detection_results(image: np.ndarray, detections: List[Dict], 
                            show_plate: bool = True, show_type: bool = True,
-                           show_speed: bool = False) -> np.ndarray:
+                           show_speed: bool = False, speed_limit: float = None) -> np.ndarray:
     """
-    在图像上绘制检测结果（支持中文显示）
+    在图像上绘制检测结果（支持中文显示，超速红框，正常绿框）
     
     Args:
-        image: 输入图像 (BGR)
-        detections: 检测结果列表
-        show_plate: 是否显示车牌
-        show_type: 是否显示车型
-        show_speed: 是否显示车速
+        speed_limit: 限速阈值 (km/h)，如果为 None 则不判断超速
     """
     vis = image.copy()
     
     for det in detections:
-        track_id = det.get('track_id', 0)
         bbox = det.get('bbox', None)
         
         if bbox is None:
@@ -328,8 +326,15 @@ def draw_detection_results(image: np.ndarray, detections: List[Dict],
             
         x1, y1, x2, y2 = [int(v) for v in bbox]
         
-        # 根据车辆ID分配颜色
-        color = get_vehicle_color(track_id)
+        # === 修改核心：颜色判定逻辑 ===
+        # 默认绿色 (BGR: 0, 255, 0)
+        color = (0, 255, 0)
+        
+        # 如果开启了车速显示，且检测到了车速，且设置了限速
+        if show_speed and 'speed' in det and speed_limit is not None:
+            # 如果车速超过限速，改为红色 (BGR: 0, 0, 255)
+            if det['speed'] > speed_limit:
+                color = (0, 0, 255)
         
         # 绘制边界框
         cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
@@ -349,56 +354,95 @@ def draw_detection_results(image: np.ndarray, detections: List[Dict],
             # 计算文本位置
             text_y = y1 - 5 if y1 > 30 else y2 + 25
             
-            # 使用支持中文的绘制函数
+            # === 修改核心：文字颜色 ===
+            # color=(0, 0, 0): 黑色文字
+            # bg_color=color: 背景色跟随框的颜色(红或绿)
             vis = put_chinese_text(vis, label_text, (x1, text_y - 20), 
-                                   font_size=20, color=(255, 255, 255), bg_color=color)
+                                   font_size=20, color=(0, 0, 0), bg_color=color)
             
     return vis
 
 def draw_statistics_charts(vehicle_counts, time_series_data=None):
     """
-    绘制统计图表
+    绘制统计图表 (Plotly 版)
     Args:
-        vehicle_counts: dict, {车型: 数量}
-        time_series_data: list, [{'time': t, 'count': c}, ...] (仅视频需要)
+        vehicle_counts: dict, {车型: 数量} (用于饼图，显示累计总数)
+        time_series_data: list, [{'time': t, 'count': c}, ...] (用于折线图，显示实时数量)
     """
     if not vehicle_counts:
         st.info("暂无统计数据")
         return
 
-    # 准备数据
-    labels = list(vehicle_counts.keys())
-    sizes = list(vehicle_counts.values())
-    
-    # 颜色映射 (与 OpenCV 绘图保持一致，转为 Hex 或 RGB 0-1)
-    # 这里为了简单，使用 matplotlib 默认或自定义一组
-    
+    # 准备饼图数据
+    df_counts = pd.DataFrame([
+        {"Type": k, "Count": v} 
+        for k, v in vehicle_counts.items()
+    ])
+
     if time_series_data is not None:
-        # === 视频模式：双图 (饼图 + 折线图) ===
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        # === 视频模式：双图 (甜甜圈图 + 折线图) ===
         
-        # 1. 饼图
-        ax1.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=140, shadow=True)
-        ax1.set_title("车型分布比例")
+        # 创建子图布局：1行2列
+        # type='domain' 用于饼图，type='xy' 用于折线图
+        fig = make_subplots(
+            rows=1, cols=2,
+            specs=[[{'type': 'domain'}, {'type': 'xy'}]],
+            subplot_titles=("车型分布比例 (累计)", "累计车辆通行趋势")
+        )
+
+        # 1. 左侧：甜甜圈图 (与图片模式风格一致)
+        fig.add_trace(
+            go.Pie(
+                labels=df_counts['Type'],
+                values=df_counts['Count'],
+                hole=0.4,  # 设置空心，变成甜甜圈
+                marker=dict(colors=px.colors.qualitative.Set3), # 使用相同的配色
+                name="车型占比",
+                hoverinfo="label+percent+value"
+            ),
+            row=1, col=1
+        )
+
+        # 2. 右侧：折线图
+        df_time = pd.DataFrame(time_series_data)
+        fig.add_trace(
+            go.Scatter(
+                x=df_time['time'],
+                y=df_time['count'],
+                mode='lines',
+                name="累计车辆数",
+                line=dict(color='#636EFA', width=2), # Plotly 默认蓝
+                fill='tozeroy', # 填充下方区域，更美观
+                fillcolor='rgba(99, 110, 250, 0.2)' # 半透明填充
+            ),
+            row=1, col=2
+        )
+
+        # 更新布局设置
+        fig.update_layout(
+            height=400,
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5)
+        )
         
-        # 2. 折线图
-        if time_series_data:
-            df_time = pd.DataFrame(time_series_data)
-            ax2.plot(df_time['time'], df_time['count'], marker='o', linestyle='-', color='b', linewidth=2)
-            ax2.fill_between(df_time['time'], df_time['count'], color='skyblue', alpha=0.3)
-            ax2.set_xlabel("时间 (s)")
-            ax2.set_ylabel("累计车辆总数")
-            ax2.set_title("车流量随时间趋势")
-            ax2.grid(True, linestyle='--', alpha=0.7)
+        # 更新坐标轴标签
+        fig.update_xaxes(title_text="时间 (s)", row=1, col=2)
+        fig.update_yaxes(title_text="累计通行车辆数", row=1, col=2)
+
+        st.plotly_chart(fig, use_container_width=True)
             
     else:
-        # === 图片模式：单图 (饼图) ===
-        fig, ax1 = plt.subplots(figsize=(6, 6))
-        ax1.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=140, shadow=True)
-        ax1.set_title("车型识别分布比例")
-    
-    st.pyplot(fig)
-    plt.close(fig) # 释放内存
+        # === 图片模式：单图 (甜甜圈图) ===
+        # 注意：实际上图片模式代码里直接用了 px.pie，这个分支可能不会被用到，但保留作为兼容
+        fig = px.pie(
+            df_counts, 
+            values='Count', 
+            names='Type', 
+            hole=0.4,
+            color_discrete_sequence=px.colors.qualitative.Set3
+        )
+        fig.update_layout(title_text="车型识别分布比例")
+        st.plotly_chart(fig, use_container_width=True)
 
 def process_image(image: np.ndarray, enable_plate: bool, enable_type: bool) -> Tuple[np.ndarray, pd.DataFrame]:
     """处理单张图片 (已添加合并逻辑)"""
@@ -475,7 +519,7 @@ def process_image(image: np.ndarray, enable_plate: bool, enable_type: bool) -> T
 
 
 def process_video(video_path: str, enable_plate: bool, enable_type: bool, enable_speed: bool,
-                  speed_estimator=None, progress_callback=None) -> str:
+                  speed_estimator=None, progress_callback=None, speed_limit: float = None) -> str:
     """处理视频 (已添加合并逻辑)"""
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened(): raise ValueError(f"无法打开视频: {video_path}")
@@ -489,8 +533,13 @@ def process_video(video_path: str, enable_plate: bool, enable_type: bool, enable
     fourcc = cv2.VideoWriter_fourcc(*'avc1') 
     writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
     
+    # 1. 加载模型
     plate_recognizer = load_paddle_plate_recognizer() if enable_plate else None
     vehicle_classifier = load_vehicle_classifier() if enable_type else None
+    
+    # [新增] 重置车牌识别记忆，防止上一个视频的数据干扰
+    if plate_recognizer:
+        plate_recognizer.reset_memory()
     
     if enable_speed and speed_estimator:
         speed_estimator.fps = fps
@@ -524,55 +573,113 @@ def process_video(video_path: str, enable_plate: bool, enable_type: bool, enable
                     'conf': res['conf']
                 })
 
-        # --- B. 车牌识别 ---
+        # --- B. 车牌识别 (修改处：使用带记忆的 process_frame) ---
         if enable_plate and plate_recognizer:
-            # 这里的 recognize_image 返回的是 list[dict]
-            current_plates = plate_recognizer.recognize_image(frame)
+            # 💡 [修改] 这里不再调用 recognize_image，而是调用 process_frame
+            # 传入 frame_idx 用于控制 OCR 频率
+            current_plates = plate_recognizer.process_video_frame(frame, frame_idx)
 
-        # --- C. 合并逻辑 ---
+        # --- C. 合并逻辑 (保持不变) ---
         if enable_type and current_vehicles:
             final_detections = associate_plates_to_vehicles(current_vehicles, current_plates)
         else:
-            # 没有车或者没开车型识别，只显示车牌
-            final_detections = current_vehicles # 包含空的或者仅有车的(如果有逻辑漏洞的话)
+            final_detections = current_vehicles
             for p in current_plates:
+                # 注意：p['track_id'] 现在是 PaddleModel 内部的记忆ID
+                # 如果没有车型识别，我们就用这个ID
                 final_detections.append({
                     'bbox': p['bbox'],
                     'plate_text': p['text'],
-                    'track_id': -1
+                    'track_id': p['track_id'] 
                 })
         
-        # --- D. 车速识别 (单独处理，追加到列表) ---
+        # --- D. 车速识别 (修改版：基于坐标重叠进行合并) ---
         if enable_speed and speed_estimator and speed_estimator.calibrated:
             _, speeds_info = speed_estimator.process_frame(frame, frame_idx)
-            for track_id, info in speeds_info.items():
-                # 注意：这里可能会产生重叠框，因为车速模块有自己的检测器
-                # 完美方案是将车速模块的ID与Task1的ID对齐，但这比较复杂。
-                # 现在的处理是作为额外的框绘制。
-                final_detections.append({
-                    'track_id': track_id,
-                    'bbox': info['bbox'],
-                    'speed': info['speed']
-                })
+            
+            # 定义一个简单的 IoU (交并比) 计算函数，用于判断两个框是否重叠
+            def calculate_iou(box1, box2):
+                x1 = max(box1[0], box2[0])
+                y1 = max(box1[1], box2[1])
+                x2 = min(box1[2], box2[2])
+                y2 = min(box1[3], box2[3])
+                
+                intersection = max(0, x2 - x1) * max(0, y2 - y1)
+                area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+                area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+                union = area1 + area2 - intersection
+                return intersection / (union + 1e-6)
 
-        # --- E. 统计与绘制 ---
+            # 遍历每一个测速结果
+            for track_id, info in speeds_info.items():
+                s_bbox = info['bbox']
+                s_speed = info['speed']
+                
+                matched = False
+                
+                # 1. 尝试与现有的检测结果 (车型/车牌) 进行匹配
+                for det in final_detections:
+                    # 计算重叠度 (IoU)
+                    iou = calculate_iou(s_bbox, det['bbox'])
+                    
+                    # 情况A: 如果重叠度高 (>0.5)，认为是同一辆车 -> 合并速度
+                    if iou > 0.5:
+                        det['speed'] = s_speed
+                        # 可选：如果原来的框没有 ID (比如只是纯车牌)，可以把测速的 ID 赋给它
+                        if det.get('track_id', -1) == -1:
+                            det['track_id'] = track_id
+                        matched = True
+                        break
+                    
+                    # 情况B: 特殊处理 - 如果现有结果只是一个孤立的车牌 (框很小)
+                    # 我们检查车牌中心点是否在 测速车辆框 (框很大) 内部
+                    if 'vehicle_type' not in det and 'plate_text' in det:
+                        px1, py1, px2, py2 = det['bbox']
+                        p_cx, p_cy = (px1+px2)/2, (py1+py2)/2
+                        if s_bbox[0] < p_cx < s_bbox[2] and s_bbox[1] < p_cy < s_bbox[3]:
+                            # 车牌在车里 -> 视为匹配
+                            # 💡 关键：把小车牌框升级为大车辆框，这样视觉更统一
+                            det['bbox'] = s_bbox 
+                            det['speed'] = s_speed
+                            det['track_id'] = track_id
+                            matched = True
+                            break
+
+                # 2. 如果没匹配上 (说明这辆车没被车型识别抓到，或者只开了测速)，则作为新对象添加
+                if not matched:
+                    final_detections.append({
+                        'track_id': track_id,
+                        'bbox': s_bbox,
+                        'speed': s_speed,
+                        'vehicle_type': 'Car' # 测速模型默认为车
+                    })
+
+        # --- E. 统计与绘制 (保持不变) ---
         if frame_idx % int(fps) == 0:
+            # [修改回累计逻辑]
+            # 统计 unique_vehicle_ids 中所有集合的长度之和，即为累计去重后的车辆总数
             current_total = sum(len(ids) for ids in unique_vehicle_ids.values())
-            time_series_data.append({'time': frame_idx / fps, 'count': current_total})
+            
+            time_series_data.append({
+                'time': frame_idx / fps, 
+                'count': current_total  # 这里存的是累计总数
+            })
 
         vis_frame = draw_detection_results(frame, final_detections, 
                                            show_plate=enable_plate, 
                                            show_type=enable_type,
-                                           show_speed=enable_speed)
+                                           show_speed=enable_speed,
+                                           speed_limit=speed_limit)
         
-        if enable_type:
-            y_offset = 30
-            for cls_name in sorted(unique_vehicle_ids.keys()):
-                count = len(unique_vehicle_ids[cls_name])
-                color = vehicle_classifier.get_color(cls_name)
-                cv2.putText(vis_frame, f"{cls_name}: {count}", (20, y_offset), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-                y_offset += 30
+        # 可选：在画面上显示累计统计信息
+        # if enable_type:
+        #     y_offset = 30
+        #     for cls_name in sorted(unique_vehicle_ids.keys()):
+        #         count = len(unique_vehicle_ids[cls_name])
+        #         color = vehicle_classifier.get_color(cls_name)
+        #         cv2.putText(vis_frame, f"{cls_name}: {count}", (20, y_offset), 
+        #                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        #         y_offset += 30
 
         writer.write(vis_frame)
         frame_idx += 1
@@ -742,7 +849,7 @@ def calibration_interface(first_frame: np.ndarray, speed_estimator) -> bool:
             disp_col2.metric("像素 Y", py)
         
         with col2:
-            st.markdown("**🌍 相对坐标（请输入，单位：米）**")
+            st.markdown("**🌍 相对坐标（请输入，Y方向为道路延伸方向）**")
             input_col1, input_col2 = st.columns(2)
             world_x = input_col1.number_input("X (m)", value=0.0, format="%.1f", key="new_wx")
             world_y = input_col2.number_input("Y (m)", value=0.0, format="%.1f", key="new_wy")
@@ -1028,10 +1135,34 @@ def validation_interface(first_frame: np.ndarray, speed_estimator) -> bool:
             st.markdown(f"**评估结果**: {status}")
         
         st.markdown("---")
-        if st.button("✅ 完成，开始检测", type="primary", key="finish_validation"):
-            st.session_state.calibration_done = True
-            st.session_state.calibration_step = 'done'
-            return True
+        st.subheader("🚦 设置限速")
+        
+        col_limit1, col_limit2 = st.columns([2, 1])
+        # === 新增：限速设置输入 ===
+        with col_limit1:
+            # 默认为 60，允许修改
+            limit_input = st.number_input(
+                "请输入该路段限速值 (km/h)", 
+                min_value=0, 
+                max_value=300, 
+                value=60, 
+                step=10,
+                help="设置后，超过此速度的车辆将显示为红框，否则为绿框。"
+            )
+        
+        with col_limit2:
+            st.write("") # 占位对齐
+            st.write("") 
+            # 两个按钮：应用限速 或 不设限速
+            if st.button("✅ 确认并开始", type="primary"):
+                st.session_state.speed_limit = limit_input
+                st.session_state.calibration_done = True
+                return True
+                
+            if st.button("🚫 不设限速 (跳过)", help="所有车辆将显示为绿框"):
+                st.session_state.speed_limit = None # 无限速
+                st.session_state.calibration_done = True
+                return True
     
     return False
 
@@ -1177,15 +1308,65 @@ def main():
             st.image(cv2.cvtColor(st.session_state.result_image, cv2.COLOR_BGR2RGB), 
                      caption="处理结果", use_container_width=True)
             
-            # 新增：显示统计图表
-            if hasattr(st.session_state, 'temp_vehicle_counts'):
-                st.subheader("📊 数据统计")
-                draw_statistics_charts(st.session_state.temp_vehicle_counts, None)
+            st.markdown("---") # 添加分割线优化视觉
+
+            # === 修改开始：左右布局逻辑 ===
             
-            # 显示统计表格
-            if not st.session_state.result_df.empty:
-                st.subheader("📊 检测统计")
-                st.dataframe(st.session_state.result_df, use_container_width=True)
+            # 检查是否有数据
+            has_data = not st.session_state.result_df.empty
+            # 检查是否有车型统计数据 (即是否开启了车型识别)
+            has_counts = (hasattr(st.session_state, 'temp_vehicle_counts') 
+                          and st.session_state.temp_vehicle_counts)
+
+            if has_data:
+                # 如果有车型统计数据，则分为左右两栏 [3:2]
+                if has_counts:
+                    col1, col2 = st.columns([3, 2])
+                    
+                    # 左侧：表格
+                    with col1:
+                        st.subheader("📋 检测详情表")
+                        st.dataframe(
+                            st.session_state.result_df, 
+                            use_container_width=True,
+                            height=350 # 固定高度以配合右侧图表
+                        )
+                    
+                    # 右侧：饼图 (使用 Plotly 实现交互式图表)
+                    with col2:
+                        st.subheader("📊 车型分布")
+                        
+                        # 将字典转换为 DataFrame 给 Plotly 使用
+                        counts_data = [
+                            {"Type": k, "Count": v} 
+                            for k, v in st.session_state.temp_vehicle_counts.items()
+                        ]
+                        df_counts = pd.DataFrame(counts_data)
+                        
+                        # 绘制甜甜圈图
+                        fig = px.pie(
+                            df_counts, 
+                            values='Count', 
+                            names='Type', 
+                            hole=0.4,
+                            color_discrete_sequence=px.colors.qualitative.Set3
+                        )
+                        
+                        # 调整布局，减少空白
+                        fig.update_layout(
+                            margin=dict(t=20, b=20, l=20, r=20),
+                            height=350,
+                            showlegend=True,
+                            legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5)
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                
+                # 如果没有车型统计 (比如只开了车牌识别)，则全宽显示表格
+                else:
+                    st.subheader("📋 检测详情表")
+                    st.dataframe(st.session_state.result_df, use_container_width=True)
+            
             else:
                 st.info("未检测到车辆/车牌")
                 
@@ -1262,7 +1443,8 @@ def main():
                     enable_type=enable_type,
                     enable_speed=enable_speed,
                     speed_estimator=speed_estimator,
-                    progress_callback=update_progress
+                    progress_callback=update_progress,
+                    speed_limit=st.session_state.get('speed_limit', None)
                 )
                 
                 st.session_state.processing_done = True
