@@ -16,8 +16,6 @@
    - 来源: 从 Ultralytics 官网下载 `yolo11l.pt`
    - 下载后重命名为 `yolov11l.pt`
 
-## 可选的权重文件
-
-4. **vehicle_classifier.pth** - 车型分类模型 (暂未实现)
-   - 当前使用基于 COCO 类别的简单分类
-   - 完整模型待后续实现
+4. **`vehicle_classifier.pt** - 车型分类模型
+   - 来源：`task1/best.pth`
+   - 复制命令: `cp task1/best.pth UI_App/weights/vehicle_classifier.pt`

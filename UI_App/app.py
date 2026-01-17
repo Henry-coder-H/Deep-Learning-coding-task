@@ -226,8 +226,8 @@ def load_vehicle_classifier():
     from models.vehicle_classifier import VehicleTypeClassifier
     
     # 指向你的 Task1 训练好的权重
-    # 请确保将 task1/best.pt 复制到 UI_App/weights/best.pt
-    classifier_weights = WEIGHTS_DIR / "best.pt" 
+    # 请确保将 task1/best.pt 复制到 UI_App/weights中
+    classifier_weights = WEIGHTS_DIR / "vehicle_classifier.pt" 
     
     if classifier_weights.exists():
         return VehicleTypeClassifier(str(classifier_weights))
